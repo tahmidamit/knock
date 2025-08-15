@@ -29,7 +29,13 @@ export default function WebRTCClient({
     
     const peer = new SimplePeer({
       initiator: isInitiator,
-      trickle: false
+      trickle: false,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
     });
 
     peer.on('signal', (signal) => {
@@ -43,6 +49,13 @@ export default function WebRTCClient({
         socket.emit('webrtc-answer', {
           targetUserId: otherUserId,
           answer: signal,
+          chatId
+        });
+      } else {
+        // Handle ICE candidates and other signaling data
+        socket.emit('webrtc-ice-candidate', {
+          targetUserId: otherUserId,
+          candidate: signal,
           chatId
         });
       }
@@ -95,7 +108,7 @@ export default function WebRTCClient({
 
   useEffect(() => {
     // Listen for WebRTC signaling events
-    socket.on('webrtc-offer', (data: any) => {
+    socket.on('webrtc-offer-received', (data: any) => {
       if (data.chatId === chatId) {
         console.log('Received WebRTC offer');
         initiatePeerConnection(false);
@@ -105,23 +118,23 @@ export default function WebRTCClient({
       }
     });
 
-    socket.on('webrtc-answer', (data: any) => {
+    socket.on('webrtc-answer-received', (data: any) => {
       if (data.chatId === chatId && peerRef.current) {
         console.log('Received WebRTC answer');
         peerRef.current.signal(data.answer);
       }
     });
 
-    socket.on('webrtc-ice-candidate', (data: any) => {
+    socket.on('webrtc-ice-candidate-received', (data: any) => {
       if (data.chatId === chatId && peerRef.current) {
         peerRef.current.signal(data.candidate);
       }
     });
 
     return () => {
-      socket.off('webrtc-offer');
-      socket.off('webrtc-answer');
-      socket.off('webrtc-ice-candidate');
+      socket.off('webrtc-offer-received');
+      socket.off('webrtc-answer-received');
+      socket.off('webrtc-ice-candidate-received');
       
       if (peerRef.current) {
         peerRef.current.destroy();

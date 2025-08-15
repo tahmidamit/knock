@@ -77,7 +77,13 @@ export default function P2PChatSection({
     
     const peer = new SimplePeer({
       initiator: isInitiator,
-      trickle: false
+      trickle: false,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
     });
 
     peer.on('signal', (signal: any) => {
@@ -93,6 +99,14 @@ export default function P2PChatSection({
         socket.emit('webrtc-answer', {
           targetUserId: otherUserId,
           answer: signal,
+          chatId
+        });
+      } else {
+        // Handle ICE candidates and other signaling data
+        console.log('🧊 Sending ICE candidate');
+        socket.emit('webrtc-ice-candidate', {
+          targetUserId: otherUserId,
+          candidate: signal,
           chatId
         });
       }
@@ -186,9 +200,9 @@ export default function P2PChatSection({
       }
     };
 
-    socket.on('webrtc-offer', handleOffer);
-    socket.on('webrtc-answer', handleAnswer);
-    socket.on('webrtc-ice-candidate', handleIceCandidate);
+    socket.on('webrtc-offer-received', handleOffer);
+    socket.on('webrtc-answer-received', handleAnswer);
+    socket.on('webrtc-ice-candidate-received', handleIceCandidate);
 
     // Call flow events
     socket.on('incoming-call', (data: any) => {
@@ -270,9 +284,9 @@ export default function P2PChatSection({
 
     return () => {
       console.log('🧹 Cleaning up WebRTC listeners');
-      socket.off('webrtc-offer', handleOffer);
-      socket.off('webrtc-answer', handleAnswer);
-      socket.off('webrtc-ice-candidate', handleIceCandidate);
+      socket.off('webrtc-offer-received', handleOffer);
+      socket.off('webrtc-answer-received', handleAnswer);
+      socket.off('webrtc-ice-candidate-received', handleIceCandidate);
       socket.off('incoming-call');
       socket.off('call-accepted');
       socket.off('call-rejected');
@@ -535,7 +549,7 @@ export default function P2PChatSection({
             onChange={(e) => setMessageInput(e.target.value)}
             onKeyPress={handleKeyPress}
             placeholder="Type a message..."
-            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-black bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <button
             onClick={handleSendMessage}

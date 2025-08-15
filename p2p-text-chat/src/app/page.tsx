@@ -69,14 +69,14 @@ export default function Home() {
           </div>
 
           {/* Combined Chat and Invite Sections */}
-          <div className="grid lg:grid-cols-4 gap-6">
+          <div className="grid lg:grid-cols-4 gap-6 md:gap-8">
             {/* Chat Section - Left Side (Takes up 3 columns) */}
             <div className="lg:col-span-3">
               <ChatSection />
             </div>
             
             {/* Invite Section - Right Side (Takes up 1 column) */}
-            <div className="lg:col-span-1">
+            <div className="lg:col-span-1 space-y-6 md:space-y-0">
               <InviteSection />
             </div>
           </div>

@@ -38,8 +38,22 @@ const authenticate = async (socket, next) => {
   }
 };
 
+// Utility function for verifying tokens in API routes
+const verifyAuthToken = (token) => {
+  if (!token) {
+    return null;
+  }
+  
+  try {
+    return verifyToken(token);
+  } catch (error) {
+    return null;
+  }
+};
+
 module.exports = {
   generateToken,
   verifyToken,
-  authenticate
+  authenticate,
+  verifyAuthToken
 };

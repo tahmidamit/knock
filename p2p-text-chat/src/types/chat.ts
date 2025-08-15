@@ -30,6 +30,7 @@ export interface Chat {
 export interface ChatState {
   currentUser: string | null;
   onlineUsers: User[];
+  searchResults: User[];
   pendingInvites: Invite[];
   activeChats: Chat[];
   currentChatId: string | null;

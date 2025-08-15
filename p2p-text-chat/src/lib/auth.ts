@@ -1,6 +1,6 @@
 const API_BASE_URL = typeof window !== 'undefined' 
-  ? `http://${window.location.hostname}:3000`
-  : 'http://localhost:3000';
+  ? `https://${window.location.hostname}:3000`
+  : 'https://localhost:3000';
 
 export interface AuthResponse {
   message: string;

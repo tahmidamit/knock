@@ -41,6 +41,7 @@ const initialState: ChatState = {
   activeChats: [],
   currentChatId: null,
   messages: {},
+  searchResults: [],
 };
 
 function chatReducer(state: ChatState, action: Action): ChatState {
@@ -122,7 +123,7 @@ function chatReducer(state: ChatState, action: Action): ChatState {
       };
     
     case 'UPDATE_SEARCH_RESULTS':
-      return { ...state, onlineUsers: action.payload };
+      return { ...state, searchResults: action.payload };
     
     default:
       return state;
@@ -148,7 +149,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
 
     // Connection events
     socket.on('connect', () => {
-      console.log('Connected to server');
+      // Connection established
     });
 
     socket.on('connect_error', (error) => {
@@ -190,18 +191,20 @@ export function ChatProvider({ children }: ChatProviderProps) {
 
     // Invite events
     socket.on('new-invite', (invite: Invite) => {
+      console.log('📨 New invite received:', invite);
       dispatch({ type: 'ADD_INVITE', payload: invite });
     });
 
     socket.on('pending-invites', (invites: Invite[]) => {
+      console.log('📋 Pending invites loaded:', invites);
       dispatch({ type: 'SET_PENDING_INVITES', payload: invites });
     });
 
-    socket.on('invite-accepted', (data: { username: string; chatId: string }) => {
+    socket.on('invite-accepted', (data: { chatId: string; otherUser: string; otherUserId: string }) => {
       const newChat: Chat = {
         chatId: data.chatId,
-        otherUser: data.username,
-        otherUserId: data.username, // Using username as userId
+        otherUser: data.otherUser,
+        otherUserId: data.otherUserId,
         lastMessage: null,
         createdAt: new Date().toISOString(),
         isOtherUserOnline: false // Default to false, will be updated by online status

@@ -4,10 +4,12 @@ let socket: Socket | null = null;
 
 export const initSocket = (token: string): Socket => {
   if (!socket) {
-    // Always use the current hostname for socket connection
-    const socketURL = typeof window !== 'undefined' 
-      ? `http://${window.location.hostname}:3000`
-      : 'http://localhost:3000';
+    // Connect to Socket.IO on separate port (3001) to avoid Next.js conflicts
+    const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https' : 'http';
+    const hostname = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+    const socketPort = 3001; // Separate port for Socket.IO
+    
+    const socketURL = `${protocol}://${hostname}:${socketPort}`;
         
     socket = io(socketURL, {
       auth: {

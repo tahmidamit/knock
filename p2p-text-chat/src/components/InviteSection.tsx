@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useChat } from '@/contexts/ChatContext';
-import { Search, UserPlus, Check, X, LogOut } from 'lucide-react';
+import { Search, UserPlus, Check, X, LogOut, Users } from 'lucide-react';
 
 export default function InviteSection() {
   const {
@@ -13,10 +13,15 @@ export default function InviteSection() {
   } = useChat();
   
   const [searchTerm, setSearchTerm] = useState('');
-  const [searchResults, setSearchResults] = useState<any[]>([]);
 
   // Get list of users who are already in active chats
   const activeChattingUsers = new Set(state.activeChats.map(chat => chat.otherUser));
+
+  // Get list of users who already have pending invites (sent or received)
+  const usersWithPendingInvites = new Set([
+    ...state.pendingInvites.map(invite => invite.from),
+    ...state.pendingInvites.map(invite => invite.to)
+  ]);
 
   const handleSearch = () => {
     if (searchTerm.trim()) {
@@ -25,9 +30,13 @@ export default function InviteSection() {
   };
 
   const handleSendInvite = (username: string) => {
+    // Check if there's already a pending invite for this user
+    if (usersWithPendingInvites.has(username)) {
+      return;
+    }
+
     sendInvite(username);
     setSearchTerm('');
-    setSearchResults([]);
   };
 
   const handleAcceptInvite = (inviteId: string) => {
@@ -38,16 +47,18 @@ export default function InviteSection() {
     respondToInvite(inviteId, 'reject');
   };
 
-  // Filter out users who are already in active chats
-  const availableUsers = state.onlineUsers.filter(user => 
-    !activeChattingUsers.has(user.username)
+  // Filter out users who are already in active chats or have pending invites
+  const usersToShow = searchTerm.trim() ? state.searchResults : state.onlineUsers;
+  const availableUsers = usersToShow.filter(user => 
+    !activeChattingUsers.has(user.username) && !usersWithPendingInvites.has(user.username)
   );
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 md:space-y-8">
       {/* Search and Send Invites */}
-      <div className="bg-white rounded-lg shadow-md p-6">
-        <h2 className="text-xl font-semibold mb-4 text-gray-700">
+      <div className="bg-white rounded-lg shadow-md p-6 md:border-l-4 md:border-blue-500">
+        <h2 className="text-xl font-semibold mb-4 text-gray-700 md:flex md:items-center md:gap-2">
+          <Search className="w-5 h-5 text-blue-500 hidden md:inline" />
           Find Users
         </h2>
         
@@ -61,7 +72,7 @@ export default function InviteSection() {
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
-                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-black bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <button
@@ -82,19 +93,32 @@ export default function InviteSection() {
                   className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center text-white font-medium">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-medium ${
+                      user.status === 'online' ? 'bg-green-500' : 'bg-gray-400'
+                    }`}>
                       {user.username.charAt(0).toUpperCase()}
                     </div>
                     <span className="font-medium">{user.username}</span>
-                    <span className="text-xs text-green-500">● online</span>
+                    <span className={`text-xs ${
+                      user.status === 'online' ? 'text-green-500' : 'text-gray-400'
+                    }`}>
+                      ● {user.status}
+                    </span>
                   </div>
-                  <button
-                    onClick={() => handleSendInvite(user.username)}
-                    className="flex items-center gap-1 px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors text-sm"
-                  >
-                    <UserPlus className="w-4 h-4" />
-                    Invite
-                  </button>
+                  {usersWithPendingInvites.has(user.username) ? (
+                    <div className="flex items-center gap-1 px-3 py-1 bg-gray-400 text-white rounded-md text-sm cursor-not-allowed">
+                      <Check className="w-4 h-4 text-white" />
+                      Pending
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handleSendInvite(user.username)}
+                      className="flex items-center gap-1 px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors text-sm"
+                    >
+                      <UserPlus className="w-4 h-4 text-white" />
+                      Invite
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -122,8 +146,9 @@ export default function InviteSection() {
       </div>
 
       {/* Pending Invites */}
-      <div className="bg-white rounded-lg shadow-md p-6">
-        <h2 className="text-xl font-semibold mb-4 text-gray-700">
+      <div className="bg-white rounded-lg shadow-md p-6 md:border-l-4 md:border-green-500">
+        <h2 className="text-xl font-semibold mb-4 text-gray-700 md:flex md:items-center md:gap-2">
+          <UserPlus className="w-5 h-5 text-green-500 hidden md:inline" />
           Pending Invites ({state.pendingInvites.length})
         </h2>
         
