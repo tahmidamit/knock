@@ -35,6 +35,7 @@ export default function P2PChatSection({
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0); // Force re-initialization
   const [offerStatus, setOfferStatus] = useState<string>('');
+  const [incomingCall, setIncomingCall] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const peerRef = useRef<SimplePeer.Instance | null>(null);
 
@@ -189,6 +190,53 @@ export default function P2PChatSection({
     socket.on('webrtc-answer', handleAnswer);
     socket.on('webrtc-ice-candidate', handleIceCandidate);
 
+    // Call flow events
+    socket.on('incoming-call', (data: any) => {
+      if (data.chatId === chatId) {
+        console.log(`📞 Incoming call from ${data.fromUsername}`);
+        setIncomingCall(data);
+        setOfferStatus(`Incoming call from ${data.fromUsername}`);
+      }
+    });
+
+    socket.on('call-accepted', (data: any) => {
+      console.log('🔍 call-accepted event received:', data);
+      if (data.chatId === chatId) {
+        console.log(`✅ Call accepted by ${data.acceptedBy} - starting WebRTC connection`);
+        setOfferStatus('Call accepted - starting WebRTC...');
+        setIsConnecting(false);
+        
+        // Caller initiates WebRTC connection
+        console.log(`🎯 Caller (${currentUser}) initiating WebRTC connection`);
+        initiatePeerConnection(true);
+      } else {
+        console.log('❌ call-accepted event ignored - chatId mismatch:', {
+          eventChatId: data.chatId,
+          currentChatId: chatId
+        });
+      }
+    });
+
+    socket.on('call-rejected', (data: any) => {
+      if (data.chatId === chatId) {
+        console.log(`❌ Call rejected: ${data.reason}`);
+        setOfferStatus(`Call rejected: ${data.reason}`);
+        setIsConnecting(false);
+        // Clear status after 5 seconds
+        setTimeout(() => setOfferStatus(''), 5000);
+      }
+    });
+
+    socket.on('call-failed', (data: any) => {
+      if (data.chatId === chatId) {
+        console.log(`❌ Call failed: ${data.reason}`);
+        setOfferStatus(`Call failed: ${data.reason}`);
+        setIsConnecting(false);
+        // Clear status after 5 seconds
+        setTimeout(() => setOfferStatus(''), 5000);
+      }
+    });
+
     // Handle pending offer notification
     socket.on('webrtc-offer-pending', (data: any) => {
       if (data.chatId === chatId) {
@@ -199,11 +247,37 @@ export default function P2PChatSection({
       }
     });
 
+    // Socket message events
+    socket.on('receive-message', (data: any) => {
+      if (data.chatId === chatId) {
+        const message: Message = {
+          id: data.messageId || `${Date.now()}-${Math.random()}`,
+          sender: data.sender,
+          content: data.content,
+          timestamp: data.timestamp || new Date().toISOString()
+        };
+        
+        setMessages(prev => {
+          // Check if message already exists (prevent duplicates)
+          const exists = prev.some(m => m.id === message.id);
+          if (exists) return prev;
+          return [...prev, message];
+        });
+        
+        console.log('📨 Message received via socket:', message);
+      }
+    });
+
     return () => {
       console.log('🧹 Cleaning up WebRTC listeners');
       socket.off('webrtc-offer', handleOffer);
       socket.off('webrtc-answer', handleAnswer);
       socket.off('webrtc-ice-candidate', handleIceCandidate);
+      socket.off('incoming-call');
+      socket.off('call-accepted');
+      socket.off('call-rejected');
+      socket.off('call-failed');
+      socket.off('receive-message');
       socket.off('webrtc-offer-pending');
     };
   }, [socket, chatId, connectionAttempt]); // Include connectionAttempt to force re-setup
@@ -219,13 +293,74 @@ export default function P2PChatSection({
     };
   }, []);
 
+  // Call management functions
+  const initiateCall = () => {
+    console.log(`📞 Initiating call to ${otherUserId} for chat ${chatId}`);
+    setIsConnecting(true);
+    setOfferStatus(`Calling ${otherUser}...`);
+    
+    socket.emit('call-initiate', {
+      targetUserId: otherUserId,
+      chatId
+    });
+  };
+
+  const acceptCall = () => {
+    if (!incomingCall) return;
+    
+    console.log(`✅ Accepting call from ${incomingCall.fromUsername}`);
+    setOfferStatus(`Accepting call from ${incomingCall.fromUsername}...`);
+    
+    socket.emit('call-accept', {
+      callId: incomingCall.callId,
+      chatId: incomingCall.chatId,
+      fromUserId: incomingCall.fromUserId
+    });
+    
+    setIncomingCall(null);
+    setIsConnecting(true);
+  };
+
+  const rejectCall = () => {
+    if (!incomingCall) return;
+    
+    console.log(`❌ Rejecting call from ${incomingCall.fromUsername}`);
+    setOfferStatus(`Rejected call from ${incomingCall.fromUsername}`);
+    
+    socket.emit('call-reject', {
+      callId: incomingCall.callId,
+      chatId: incomingCall.chatId,
+      fromUserId: incomingCall.fromUserId,
+      reason: 'Call declined'
+    });
+    
+    setIncomingCall(null);
+    
+    // Clear status after 3 seconds
+    setTimeout(() => setOfferStatus(''), 3000);
+  };
+
+  const retryConnection = () => {
+    console.log('🔄 Retrying WebRTC connection...');
+    setConnectionAttempt(prev => prev + 1);
+    setOfferStatus('Retrying connection...');
+    
+    // Clean up existing connection
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    setIsWebRTCConnected(false);
+    setIsConnecting(false);
+    
+    // Retry after a short delay
+    setTimeout(() => {
+      initiatePeerConnection(true);
+    }, 1000);
+  };
+
   const handleSendMessage = () => {
     if (!messageInput.trim()) return;
-
-    if (!isWebRTCConnected) {
-      alert('WebRTC connection required. Please connect first.');
-      return;
-    }
 
     const messageData: Message = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -234,13 +369,32 @@ export default function P2PChatSection({
       timestamp: new Date().toISOString()
     };
 
-    // Send via WebRTC
-    if (peerRef.current) {
-      peerRef.current.send(JSON.stringify(messageData));
-      
-      // Add to local messages
-      setMessages(prev => [...prev, messageData]);
-      setMessageInput('');
+    // Add to local messages immediately for optimistic update
+    setMessages(prev => [...prev, messageData]);
+    setMessageInput('');
+
+    // Try P2P first, fallback to socket
+    if (isWebRTCConnected && peerRef.current) {
+      try {
+        peerRef.current.send(JSON.stringify(messageData));
+        console.log('📨 Message sent via P2P');
+      } catch (error) {
+        console.log('📡 P2P failed, falling back to socket');
+        socket.emit('send-message', {
+          chatId,
+          content: messageData.content,
+          sender: currentUser,
+          messageId: messageData.id
+        });
+      }
+    } else {
+      console.log('📡 Sending message via socket');
+      socket.emit('send-message', {
+        chatId,
+        content: messageData.content,
+        sender: currentUser,
+        messageId: messageData.id
+      });
     }
   };
 
@@ -249,46 +403,6 @@ export default function P2PChatSection({
       e.preventDefault();
       handleSendMessage();
     }
-  };
-
-  const connectWebRTC = () => {
-    console.log('🔗 connectWebRTC called - current state:', { isConnecting, isWebRTCConnected });
-    
-    if (isConnecting || isWebRTCConnected) {
-      console.log('⚠️ Already connecting or connected, ignoring request');
-      return;
-    }
-    
-    // Clean up any existing connection first
-    if (peerRef.current) {
-      console.log('🧹 Cleaning up existing peer before new connection');
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    
-    // Determine who should initiate based on lexicographical order of usernames
-    // This prevents race conditions by ensuring consistent initiator
-    const shouldInitiate = currentUser < otherUser;
-    console.log(`🎯 Connection logic: ${currentUser} vs ${otherUser} - shouldInitiate: ${shouldInitiate}`);
-    
-    console.log('🔗 WebRTC connection initiated');
-    setOfferStatus('Establishing P2P connection...');
-    initiatePeerConnection(shouldInitiate);
-  };
-
-  const disconnectWebRTC = () => {
-    console.log('🔌 Disconnecting WebRTC');
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    setIsWebRTCConnected(false);
-    setIsConnecting(false);
-    setOfferStatus('');
-    
-    // Increment connection attempt to force listener re-setup
-    setConnectionAttempt(prev => prev + 1);
-    console.log('🔄 Incremented connection attempt for reconnection');
   };
 
   return (
@@ -310,24 +424,42 @@ export default function P2PChatSection({
           </div>
         </div>
         <div className="flex items-center space-x-2">
-          {!isWebRTCConnected ? (
-            <button
-              onClick={connectWebRTC}
-              disabled={isConnecting}
-              className="bg-green-500 hover:bg-green-600 px-3 py-1 rounded flex items-center space-x-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Phone size={16} />
-              <span>
-                {isConnecting ? 'Connecting...' : 'Connect P2P'}
-              </span>
-            </button>
+          {incomingCall ? (
+            <div className="flex items-center space-x-2">
+              <span className="text-sm text-blue-200">Incoming call...</span>
+              <button
+                onClick={acceptCall}
+                className="p-2 bg-green-500 text-white rounded-full hover:bg-green-600"
+              >
+                <Phone className="w-4 h-4" />
+              </button>
+              <button
+                onClick={rejectCall}
+                className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600"
+              >
+                <PhoneOff className="w-4 h-4" />
+              </button>
+            </div>
           ) : (
             <button
-              onClick={disconnectWebRTC}
-              className="bg-red-500 hover:bg-red-600 px-3 py-1 rounded flex items-center space-x-1"
+              onClick={initiateCall}
+              disabled={isConnecting || isWebRTCConnected}
+              className={`p-2 rounded-full ${
+                isConnecting || isWebRTCConnected
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-green-500 text-white hover:bg-green-600'
+              }`}
             >
-              <PhoneOff size={16} />
-              <span>Disconnect</span>
+              <Phone className="w-4 h-4" />
+            </button>
+          )}
+          
+          {!isWebRTCConnected && offerStatus && (
+            <button
+              onClick={retryConnection}
+              className="px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600"
+            >
+              Retry
             </button>
           )}
         </div>
@@ -338,12 +470,12 @@ export default function P2PChatSection({
         {isWebRTCConnected ? (
           <span className="text-green-600 flex items-center justify-center space-x-1">
             <Wifi size={16} />
-            <span>Direct P2P connection active - messages stored locally</span>
+            <span>🔒 Connected via P2P - messages are sent directly</span>
           </span>
         ) : (
           <span className="text-orange-600 flex items-center justify-center space-x-1">
             <WifiOff size={16} />
-            <span>No P2P connection - establish connection to send messages</span>
+            <span>📡 Messages sent via server - initiate call for P2P connection</span>
           </span>
         )}
       </div>
@@ -402,24 +534,22 @@ export default function P2PChatSection({
             value={messageInput}
             onChange={(e) => setMessageInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={
-              isWebRTCConnected 
-                ? "Type your message..." 
-                : "Connect WebRTC first to send messages"
-            }
-            disabled={!isWebRTCConnected}
-            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
+            placeholder="Type a message..."
+            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <button
             onClick={handleSendMessage}
-            disabled={!messageInput.trim() || !isWebRTCConnected}
+            disabled={!messageInput.trim()}
             className="bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
           >
             <Send size={20} />
           </button>
         </div>
         <p className="text-xs text-gray-500 mt-2">
-          💾 Messages are stored locally on your device only
+          {isWebRTCConnected 
+            ? '� Messages are sent directly peer-to-peer' 
+            : '📡 Messages are sent through server'
+          }
         </p>
       </div>
     </div>

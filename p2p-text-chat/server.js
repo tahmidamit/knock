@@ -29,18 +29,21 @@ const activeConnections = new Map(); // userId -> socketId
 // Store pending WebRTC offers for offline users
 const pendingOffers = new Map(); // userId -> [{ offer, chatId, fromUserId, fromUsername, timestamp }]
 
-// Track active offer negotiations to prevent race conditions
-const activeOfferLocks = new Map(); // chatId -> { initiatorUserId, timestamp }
+// Track active call states
+const activeCalls = new Map(); // callId -> { chatId, callerUserId, calleeUserId, status, timestamp }
+
+// Call timeout (30 seconds for call initiation, 60 seconds for WebRTC after acceptance)
+const CALL_TIMEOUT_MS = 30 * 1000;
+const WEBRTC_TIMEOUT_MS = 60 * 1000;
 
 // Offer expiration time (5 minutes)
 const OFFER_EXPIRATION_MS = 5 * 60 * 1000;
 
-// Offer lock timeout (30 seconds)
-const OFFER_LOCK_TIMEOUT_MS = 30 * 1000;
-
-// Helper function to clean expired offers
-function cleanExpiredOffers() {
+// Helper function to clean expired offers and calls
+function cleanExpiredOffers(io) {
   const now = Date.now();
+  
+  // Clean expired pending offers
   for (const [userId, offers] of pendingOffers.entries()) {
     const validOffers = offers.filter(offer => (now - offer.timestamp) < OFFER_EXPIRATION_MS);
     if (validOffers.length === 0) {
@@ -48,6 +51,31 @@ function cleanExpiredOffers() {
     } else if (validOffers.length !== offers.length) {
       pendingOffers.set(userId, validOffers);
     }
+  }
+  
+  // Clean expired calls with batch notifications
+  const expiredCalls = [];
+  for (const [callId, call] of activeCalls.entries()) {
+    const timeoutMs = call.status === 'accepted' ? WEBRTC_TIMEOUT_MS : CALL_TIMEOUT_MS;
+    if (now - call.timestamp > timeoutMs) {
+      expiredCalls.push({ callId, call });
+      activeCalls.delete(callId);
+    }
+  }
+  
+  // Batch notify all expired calls
+  if (expiredCalls.length > 0) {
+    console.log(`⏰ Processing ${expiredCalls.length} expired calls`);
+    expiredCalls.forEach(({ callId, call }) => {
+      const callerSocketId = activeConnections.get(call.callerUserId);
+      const calleeSocketId = activeConnections.get(call.calleeUserId);
+      
+      const timeoutEvent = { chatId: call.chatId, callId };
+      if (callerSocketId) io.to(callerSocketId).emit('call-timeout', timeoutEvent);
+      if (calleeSocketId) io.to(calleeSocketId).emit('call-timeout', timeoutEvent);
+      
+      console.log(`⏰ Call timeout for callId: ${callId} (status: ${call.status})`);
+    });
   }
 }
 
@@ -69,9 +97,31 @@ function storePendingOffer(targetUserId, offer, chatId, fromUserId, fromUsername
   console.log(`📦 Stored pending offer from ${fromUsername} to ${targetUserId} for chat ${chatId}`);
 }
 
+// Helper function to find call by criteria
+function findCall(criteria) {
+  return Array.from(activeCalls.entries()).find(([id, call]) => {
+    return Object.keys(criteria).every(key => call[key] === criteria[key]);
+  });
+}
+
+// Helper function to notify user about call events
+function notifyCallEvent(io, userId, event, data) {
+  const socketId = activeConnections.get(userId);
+  if (socketId) {
+    io.to(socketId).emit(event, data);
+    return true;
+  }
+  return false;
+}
+
+// Helper function to generate unique call ID
+function generateCallId(chatId) {
+  return `call_${chatId}_${Date.now()}`;
+}
+
 // Helper function to deliver pending offers to a user
-function deliverPendingOffers(userId, socket) {
-  cleanExpiredOffers(); // Clean expired offers first
+function deliverPendingOffers(userId, socket, io) {
+  cleanExpiredOffers(io); // Clean expired offers first
   
   const offers = pendingOffers.get(userId);
   if (offers && offers.length > 0) {
@@ -91,9 +141,6 @@ function deliverPendingOffers(userId, socket) {
     pendingOffers.delete(userId);
   }
 }
-
-// Clean expired offers every minute
-setInterval(cleanExpiredOffers, 60000);
 
 app.prepare().then(() => {
   const httpServer = createServer(async (req, res) => {
@@ -240,6 +287,9 @@ app.prepare().then(() => {
   // Apply authentication middleware
   io.use(authenticate);
 
+  // Clean expired offers every minute
+  setInterval(() => cleanExpiredOffers(io), 60000);
+
   io.on('connection', async (socket) => {
     console.log('User connected:', socket.username, socket.id);
 
@@ -255,7 +305,7 @@ app.prepare().then(() => {
       activeConnections.set(socket.userId.toString(), socket.id);
 
       // Deliver any pending WebRTC offers
-      deliverPendingOffers(socket.userId.toString(), socket);
+      deliverPendingOffers(socket.userId.toString(), socket, io);
 
       // Send user's pending invites
       const pendingInvites = await Invite.find({
@@ -542,66 +592,244 @@ app.prepare().then(() => {
       }
     });
 
-    // WebRTC signaling for P2P connections
-    socket.on('webrtc-offer', (data) => {
-      const { targetUserId, offer, chatId } = data;
-      const targetSocketId = activeConnections.get(targetUserId);
+    // Call initiation flow - Step 1: User initiates call
+    socket.on('call-initiate', (data) => {
+      const { targetUserId, chatId } = data;
+      const fromUserId = socket.userId.toString();
       
-      if (targetSocketId) {
-        // Target user is online - deliver immediately
-        io.to(targetSocketId).emit('webrtc-offer', {
-          offer,
-          chatId,
-          fromUserId: socket.userId.toString(),
-          fromUsername: socket.username
-        });
-        console.log(`📞 WebRTC offer sent immediately from ${socket.username} to ${targetUserId}`);
-      } else {
-        // Target user is offline - store for later delivery
-        storePendingOffer(
-          targetUserId, 
-          offer, 
-          chatId, 
-          socket.userId.toString(), 
-          socket.username
-        );
-        
-        // Notify sender that offer was stored
-        socket.emit('webrtc-offer-pending', {
+      console.log(`📞 Call initiation from ${socket.username} to ${targetUserId} for chat ${chatId}`);
+      
+      if (!notifyCallEvent(io, targetUserId, 'test', {})) {
+        socket.emit('call-failed', {
           targetUserId,
           chatId,
-          message: 'Offer stored - will be delivered when user comes online'
+          reason: 'User is offline'
         });
-        console.log(`⏳ WebRTC offer from ${socket.username} to ${targetUserId} stored as pending`);
+        console.log(`❌ Call failed - user ${targetUserId} is offline`);
+        return;
+      }
+      
+      const callId = generateCallId(chatId);
+      
+      // Track the active call
+      activeCalls.set(callId, {
+        chatId,
+        callerUserId: fromUserId,
+        calleeUserId: targetUserId,
+        status: 'pending',
+        timestamp: Date.now()
+      });
+      
+      // Send call notification to target user
+      notifyCallEvent(io, targetUserId, 'incoming-call', {
+        chatId,
+        fromUserId,
+        fromUsername: socket.username,
+        callId
+      });
+      
+      // Notify caller that call was initiated
+      socket.emit('call-initiated', {
+        targetUserId,
+        chatId,
+        callId,
+        message: `Call initiated to ${targetUserId}`
+      });
+      
+      console.log(`📞 Call notification sent from ${socket.username} to ${targetUserId} (${callId})`);
+    });
+
+    // Call acceptance flow - Step 2: User accepts call
+    socket.on('call-accept', (data) => {
+      const { callId, chatId, fromUserId } = data;
+      const acceptingUserId = socket.userId.toString();
+      
+      console.log(`✅ Call accepted by ${socket.username} for chat ${chatId} (${callId})`);
+      
+      // Update call status and reset timestamp for WebRTC negotiation
+      const call = activeCalls.get(callId);
+      if (call) {
+        call.status = 'accepted';
+        call.timestamp = Date.now(); // Reset timestamp for WebRTC timeout
+        activeCalls.set(callId, call);
+        console.log(`🔧 Call status updated to 'accepted' for ${callId}`);
+      } else {
+        console.log(`❌ Call not found in activeCalls: ${callId}`);
+        console.log(`🔍 Current active calls:`, Array.from(activeCalls.keys()));
+      }
+      
+      // Notify caller that call was accepted - now they can send WebRTC offer
+      if (notifyCallEvent(io, fromUserId, 'call-accepted', {
+        chatId,
+        acceptedBy: socket.username,
+        acceptedByUserId: acceptingUserId,
+        callId
+      })) {
+        // Notify accepter to wait for offer
+        socket.emit('call-accepted-wait-for-offer', {
+          chatId,
+          callId,
+          callerUserId: fromUserId
+        });
+        
+        console.log(`✅ Call acceptance confirmed for chat ${chatId} - WebRTC can begin`);
+      } else {
+        // Caller is no longer online
+        socket.emit('call-failed', {
+          chatId,
+          reason: 'Caller is no longer online'
+        });
+        
+        // Clean up the call
+        activeCalls.delete(callId);
+        console.log(`❌ Call ${callId} failed - caller offline`);
+      }
+    });
+
+    // Call rejection flow - Step 3: User rejects call
+    socket.on('call-reject', (data) => {
+      const { callId, chatId, fromUserId, reason = 'Call declined' } = data;
+      
+      console.log(`❌ Call rejected by ${socket.username} for chat ${chatId} (${callId})`);
+      
+      // Clean up the call
+      activeCalls.delete(callId);
+      
+      // Notify caller that call was rejected
+      notifyCallEvent(io, fromUserId, 'call-rejected', {
+        chatId,
+        rejectedBy: socket.username,
+        reason,
+        callId
+      });
+      
+      console.log(`❌ Call rejection notified for chat ${chatId}: ${reason}`);
+    });
+
+    // WebRTC signaling for P2P connections (only after call acceptance)
+    socket.on('webrtc-offer', (data) => {
+      const { targetUserId, offer, chatId } = data;
+      const fromUserId = socket.userId.toString();
+      
+      console.log(`📞 WebRTC offer received from ${socket.username} for chat ${chatId} to user ${targetUserId}`);
+      
+      // Check if there's an accepted call for this chat
+      console.log(`🔍 Searching for accepted call - chatId: ${chatId}, fromUserId: ${fromUserId}, targetUserId: ${targetUserId}`);
+      console.log(`🔍 Active calls:`, Array.from(activeCalls.entries()).map(([id, call]) => ({
+        id,
+        chatId: call.chatId,
+        status: call.status,
+        callerUserId: call.callerUserId,
+        calleeUserId: call.calleeUserId
+      })));
+      
+      const acceptedCall = Array.from(activeCalls.values()).find(call => 
+        call.chatId === chatId && 
+        call.status === 'accepted' && 
+        call.callerUserId === fromUserId &&
+        call.calleeUserId === targetUserId
+      );
+      
+      console.log(`🔍 Found accepted call:`, acceptedCall);
+      
+      if (!acceptedCall) {
+        console.log(`🔒 WebRTC offer rejected - no accepted call for chat ${chatId}`);
+        console.log(`🔍 Search criteria: chatId=${chatId}, status=accepted, callerUserId=${fromUserId}, calleeUserId=${targetUserId}`);
+        socket.emit('webrtc-offer-rejected', {
+          chatId,
+          reason: 'No accepted call found. Please initiate call first.'
+        });
+        return;
+      }
+      
+      // Send offer using utility function
+      if (notifyCallEvent(io, targetUserId, 'webrtc-offer', {
+        offer,
+        chatId,
+        fromUserId: fromUserId,
+        fromUsername: socket.username
+      })) {
+        console.log(`📞 WebRTC offer sent from ${socket.username} to ${targetUserId}`);
+      } else {
+        // Target user is offline
+        socket.emit('webrtc-offer-rejected', {
+          chatId,
+          reason: 'Target user is no longer online'
+        });
+        
+        // Clean up the call since user went offline
+        const callToDelete = Array.from(activeCalls.entries()).find(([id, call]) => 
+          call.chatId === chatId && call.status === 'accepted'
+        );
+        if (callToDelete) {
+          activeCalls.delete(callToDelete[0]);
+        }
+        
+        console.log(`❌ WebRTC offer failed - user ${targetUserId} went offline`);
       }
     });
 
     socket.on('webrtc-answer', (data) => {
       const { targetUserId, answer, chatId } = data;
-      const targetSocketId = activeConnections.get(targetUserId);
       
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('webrtc-answer', {
-          answer,
-          chatId,
-          fromUserId: socket.userId.toString(),
-          fromUsername: socket.username
-        });
-        console.log(`WebRTC answer sent from ${socket.username} to ${targetUserId}`);
+      console.log(`📞 WebRTC answer received from ${socket.username} for chat ${chatId}`);
+      
+      if (notifyCallEvent(io, targetUserId, 'webrtc-answer', {
+        answer,
+        chatId,
+        fromUserId: socket.userId.toString(),
+        fromUsername: socket.username
+      })) {
+        console.log(`📞 WebRTC answer forwarded from ${socket.username} to ${targetUserId}`);
+        
+        // Mark the call as connected and clean up call tracking
+        const callToComplete = Array.from(activeCalls.entries()).find(([id, call]) => 
+          call.chatId === chatId && call.status === 'accepted'
+        );
+        if (callToComplete) {
+          activeCalls.delete(callToComplete[0]);
+          console.log(`✅ Call completed for chat ${chatId} - WebRTC established`);
+        }
+      } else {
+        console.log(`⚠️ Target user ${targetUserId} not found for answer from ${socket.username}`);
       }
     });
 
     socket.on('webrtc-ice-candidate', (data) => {
       const { targetUserId, candidate, chatId } = data;
-      const targetSocketId = activeConnections.get(targetUserId);
       
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('webrtc-ice-candidate', {
-          candidate,
-          chatId,
-          fromUserId: socket.userId.toString()
-        });
+      console.log(`🧊 ICE candidate from ${socket.username} for chat ${chatId}`);
+      
+      if (notifyCallEvent(io, targetUserId, 'webrtc-ice-candidate', {
+        candidate,
+        chatId,
+        fromUserId: socket.userId.toString()
+      })) {
+        console.log(`🧊 ICE candidate forwarded from ${socket.username} to ${targetUserId}`);
+      } else {
+        console.log(`⚠️ Target user ${targetUserId} not found for ICE candidate from ${socket.username}`);
       }
+    });
+
+    // Handle WebRTC connection success
+    socket.on('webrtc-connected', (data) => {
+      const { chatId } = data;
+      console.log(`✅ WebRTC connection established for chat ${chatId} by ${socket.username}`);
+      
+      // Remove call from timeout tracking since WebRTC is now established
+      const callToComplete = Array.from(activeCalls.entries()).find(([id, call]) => 
+        call.chatId === chatId && call.status === 'accepted'
+      );
+      if (callToComplete) {
+        activeCalls.delete(callToComplete[0]);
+        console.log(`🗑️ Removed call ${callToComplete[0]} from timeout tracking - WebRTC established`);
+      }
+    });
+
+    // Handle WebRTC connection failure
+    socket.on('webrtc-connection-failed', (data) => {
+      const { chatId } = data;
+      console.log(`❌ WebRTC connection failed for chat ${chatId}`);
     });
 
     // Handle disconnection
@@ -618,6 +846,27 @@ app.prepare().then(() => {
 
         // Remove from active connections
         activeConnections.delete(socket.userId.toString());
+        
+        // Clean up any active calls involving this user
+        const userId = socket.userId.toString();
+        for (const [callId, call] of activeCalls.entries()) {
+          if (call.callerUserId === userId || call.calleeUserId === userId) {
+            // Notify the other party that user disconnected
+            const otherUserId = call.callerUserId === userId ? call.calleeUserId : call.callerUserId;
+            const otherSocketId = activeConnections.get(otherUserId);
+            
+            if (otherSocketId) {
+              io.to(otherSocketId).emit('call-ended', {
+                chatId: call.chatId,
+                reason: 'Other user disconnected',
+                callId
+              });
+            }
+            
+            activeCalls.delete(callId);
+            console.log(`🔚 Cleaned up call ${callId} due to user ${socket.username} disconnecting`);
+          }
+        }
         
         // Notify others
         socket.broadcast.emit('user-left', { username: socket.username });
