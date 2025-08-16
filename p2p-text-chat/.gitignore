@@ -40,3 +40,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 PROJECT-DOCUMENTATION.md
+cert.key
+cert.crt
+ca.key
+ca.crt
